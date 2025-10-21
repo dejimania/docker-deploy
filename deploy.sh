@@ -246,7 +246,7 @@ else
 fi
 
 # Test SSH connection (non-interactive)
-if ssh $SSH_OPTS -o BatchMode=yes "${SSH_USER}@${SSH_HOST}" 'echo SSH_OK' >/dev/null 2>&1; then
+if ssh -i $SSH_OPTS -o BatchMode=yes "${SSH_USER}@${SSH_HOST}" 'echo SSH_OK' >/dev/null 2>&1; then
   log "SSH dry-run OK."
 else
   err "SSH connectivity test failed. Ensure user/key/host are correct and accessible."
