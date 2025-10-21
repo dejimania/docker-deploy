@@ -20,7 +20,7 @@ LOGFILE="./deploy_${TIMESTAMP}.log"
 KEEP_LOGS=30
 SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 RSYNC_OPTS="-az --delete --exclude=.git --exclude=node_modules"
-REMOTE_APP_BASE="/opt/myapp"
+REMOTE_APP_BASE="/opt/my-blog"
 REMOTE_RELEASES_DIR="${REMOTE_APP_BASE}/releases"
 REMOTE_CURRENT_LINK="${REMOTE_APP_BASE}/current"
 NGINX_SITE_NAME="my-blog"
@@ -416,4 +416,63 @@ elif ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -f '${REMOTE_CURRENT_LINK}/do
   DEPLOY_WITH_COMPOSE=true
   REMOTE_COMPOSE_PATH="${REMOTE_CURRENT_LINK}/docker-compose.yaml"
 fi
+
+# remote deployment script (build/run) - idempotent: docker-compose down/up or docker rm/run
+read -r -d '' REMOTE_DEPLOY_SCRIPT <<'REMOTE_DEPLOY_EOF' || true
+set -euo pipefail
+APP_DIR='__APP_DIR__'
+USE_COMPOSE='__USE_COMPOSE__'
+SERVICE_NAME='myapp'   # container name used for simple docker run path; adapt as needed
+INTERNAL_PORT='__APP_INTERNAL_PORT__'
+log_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][DEPLOY] %s" "$1"; }
+err_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][DEPLOY][ERROR] %s" "$1" >&2; exit 3; }
+
+cd "$APP_DIR"
+
+if [[ "$USE_COMPOSE" == "true" ]]; then
+  # bring down previous stack gracefully (idempotent)
+  if command -v docker-compose >/dev/null 2>&1; then
+    log_remote "Using docker-compose to deploy (docker-compose down/up)"
+    docker-compose -f "$APP_DIR/docker-compose.yml" down --remove-orphans || log_remote "docker-compose down non-fatal"
+    docker-compose -f "$APP_DIR/docker-compose.yml" pull || log_remote "docker-compose pull (may be missing images)"
+    docker-compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans --build
+  else
+    # Try docker compose plugin
+    docker compose -f "$APP_DIR/docker-compose.yml" down --remove-orphans || true
+    docker compose -f "$APP_DIR/docker-compose.yml" pull || true
+    docker compose -f "$APP_DIR/docker-compose.yml" up -d --remove-orphans --build
+  fi
+else
+  # Single Dockerfile flow: build image and run container as 'my-blog'
+  IMAGE_TAG="myapp:${APP_DIR##*/}"
+  log_remote "Building image ${IMAGE_TAG}"
+  docker build -t "$IMAGE_TAG" "$APP_DIR"
+  # stop and remove existing container if exists
+  if docker ps -a --format '{{.Names}}' | grep -w "$SERVICE_NAME" >/dev/null 2>&1; then
+    docker rm -f "$SERVICE_NAME" || log_remote "Failed to remove existing container (non-fatal)"
+  fi
+  # run container (expose internal port to host ephemeral or same port)
+  docker run -d --restart unless-stopped --name "$SERVICE_NAME" -p 127.0.0.1:${INTERNAL_PORT}:${INTERNAL_PORT} "$IMAGE_TAG"
+fi
+
+REMOTE_DEPLOY_EOF
+
+REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__APP_DIR__/$REMOTE_CURRENT_LINK}"
+REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__USE_COMPOSE__/$DEPLOY_WITH_COMPOSE}"
+REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__APP_INTERNAL_PORT__/$APP_INTERNAL_PORT}"
+
+log "Executing remote deployment script..."
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'EOF' 2>>"$LOGFILE"
+$(cat <<'INNER'
+__REMOTE_DEPLOY__
+INNER
+)
+EOF
+# replace placeholder in the heredoc with actual content in a safe way
+# But simpler: using direct heredoc above is messy; instead run with variable expansion:
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -s > /dev/null 2>>"$LOGFILE" <<EOF
+$REMOTE_DEPLOY_SCRIPT
+EOF
+
+log "Remote containers started."
 
