@@ -123,3 +123,39 @@ done
 
 init_log
 
+# ---------------------------------------
+# Task 1: Gather user input and validate
+# ---------------------------------------
+log "Collecting deployment parameters..."
+
+# Prompt for parameters (unless environment variables already set and non-interactive requested).
+prompt GIT_REPO_URL "Git repository HTTPS URL (e.g. https://github.com/your_org/repo.git)"
+prompt GIT_PAT "Git Personal Access Token (will not be echoed; keep secret)"
+prompt GIT_BRANCH "Branch name (default: main)" "main"
+
+prompt SSH_USER "Remote SSH username (e.g. ubuntu, ec2-user)"
+prompt SSH_HOST "Remote server IP or hostname (e.g. 184.21.3.50)"
+prompt SSH_KEY_PATH "Path to private SSH key (leave blank to use default ssh-agent)" ""
+
+prompt APP_INTERNAL_PORT "Application internal port inside container (e.g. 80, 3000)" "3000"
+
+# optional values
+prompt PROJECT_DIR_NAME "Optional: local directory name to clone into (leave blank to use repo name derived from URL)" ""
+# enabling use of non-interactive envs as fallback
+GIT_REPO_URL="${GIT_REPO_URL}"
+GIT_PAT="${GIT_PAT}"
+GIT_BRANCH="${GIT_BRANCH:-main}"
+SSH_USER="${SSH_USER}"
+SSH_HOST="${SSH_HOST}"
+SSH_KEY_PATH="${SSH_KEY_PATH}"
+APP_INTERNAL_PORT="${APP_INTERNAL_PORT}"
+PROJECT_DIR_NAME="${PROJECT_DIR_NAME}"
+
+log "Parameters summary (sensitive values masked):"
+log "  Repo URL: $GIT_REPO_URL"
+log "  Branch: $GIT_BRANCH"
+log "  Git PAT: $(mask_secret "$GIT_PAT")"
+log "  SSH target: ${SSH_USER}@${SSH_HOST}"
+log "  SSH key: ${SSH_KEY_PATH:-(ssh-agent/default)}"
+log "  App internal port: ${APP_INTERNAL_PORT}"
+log "  Local project dir: ${PROJECT_DIR_NAME:-(derived from repo)}"
