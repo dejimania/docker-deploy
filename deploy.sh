@@ -177,4 +177,45 @@ if [[ -n "${SSH_KEY_PATH:-}" ]]; then
   ssh-add "$SSH_KEY_PATH" >/dev/null 2>&1 || warn "Unable to add SSH key to ssh-agent; ensure agent is running"
 fi
 
+# --------------------------------------------
+# Task 2: Clone the repository or pull latest
+# --------------------------------------------
+log "Preparing local repository clone/pull..."
+
+# derive repo name if not provided
+if [[ -z "$PROJECT_DIR_NAME" ]]; then
+  # parse repo name from URL
+  repo_name="$(basename -s .git "${GIT_REPO_URL}")"
+else
+  repo_name="$PROJECT_DIR_NAME"
+fi
+
+# Use a temporary sanitized URL to avoid logging PAT; build an auth URL for git
+# Note: We will not print the auth URL to logs; only use in command pipeline.
+# The common pattern: https://<token>@github.com/user/repo.git
+AUTH_GIT_URL="${GIT_REPO_URL/https:\/\//https:\/\/x-access-token:${GIT_PAT}@}"
+
+if [[ -d "$repo_name/.git" ]]; then
+  log "Local repo $repo_name exists — fetching latest"
+  pushd "$repo_name" >/dev/null
+  # set remote origin to the auth url temporarily to fetch
+  git remote get-url origin >/dev/null 2>&1 && git remote set-url origin "$AUTH_GIT_URL" || git remote add origin "$AUTH_GIT_URL"
+  git fetch --prune origin "$GIT_BRANCH" >>"$LOGFILE" 2>&1 || err "git fetch failed"
+  git checkout "$GIT_BRANCH" >>"$LOGFILE" 2>&1 || err "git checkout $GIT_BRANCH failed"
+  git pull origin "$GIT_BRANCH" >>"$LOGFILE" 2>&1 || err "git pull failed"
+  # restore remote URL to non-auth version to avoid leaving PAT in config
+  git remote set-url origin "$GIT_REPO_URL" >>"$LOGFILE" 2>&1 || true
+  popd >/dev/null
+  log "Repository updated locally."
+else
+  log "Cloning repository (branch: $GIT_BRANCH) into $repo_name"
+  # clone only the requested branch for speed
+  git clone --branch "$GIT_BRANCH" --single-branch "$AUTH_GIT_URL" "$repo_name" >>"$LOGFILE" 2>&1 || err "git clone failed"
+  # remove PAT from git config by setting remote URL back
+  pushd "$repo_name" >/dev/null
+  git remote set-url origin "$GIT_REPO_URL" >>"$LOGFILE" 2>&1 || true
+  popd >/dev/null
+  log "Repository cloned."
+fi
+
 
