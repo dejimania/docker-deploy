@@ -218,4 +218,37 @@ else
   log "Repository cloned."
 fi
 
+# ---------------------------------------------------------------------------
+# Task 3: Navigate into cloned directory and check Dockerfile/docker-compose
+# ---------------------------------------------------------------------------
+cd "$repo_name"
+log "Changed working directory to $(pwd)"
+if [[ -f "Dockerfile" ]]; then
+  log "Found Dockerfile."
+fi
+if [[ -f "docker-compose.yml" || -f "docker-compose.yaml" ]]; then
+  log "Found docker-compose file."
+fi
+if [[ ! -f "Dockerfile" && ! -f "docker-compose.yml" && ! -f "docker-compose.yaml" ]]; then
+  warn "Neither Dockerfile nor docker-compose.yml found in repository root. Cannot continue deployment."
+  err "Missing Dockerfile or docker-compose.yml"
+fi
+
+# --------------------------------------------------------
+# Task 4: SSH into the remote server: connectivity checks
+# --------------------------------------------------------
+log "Checking remote connectivity..."
+# quick ping (optional) then SSH dry-run
+if ping -c 1 -W 2 "$SSH_HOST" >/dev/null 2>&1; then
+  log "Ping to ${SSH_HOST} succeeded."
+else
+  warn "Ping to ${SSH_HOST} failed or blocked; will proceed to SSH check."
+fi
+
+# Test SSH connection (non-interactive)
+if ssh $SSH_OPTS -o BatchMode=yes "${SSH_USER}@${SSH_HOST}" 'echo SSH_OK' >/dev/null 2>&1; then
+  log "SSH dry-run OK."
+else
+  err "SSH connectivity test failed. Ensure user/key/host are correct and accessible."
+fi
 
