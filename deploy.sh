@@ -19,7 +19,7 @@ TIMESTAMP="$(date +%Y%m%d%H%M%S)"
 LOGFILE="./deploy_${TIMESTAMP}.log"
 KEEP_LOGS=30
 SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
-RSYNC_OPTS="-az --delete --exclude=.git --exclude=node_modules"
+RSYNC_OPTS=(-avz --delete --exclude=.git --exclude=node_modules)
 REMOTE_APP_BASE="/opt/my-blog"
 REMOTE_RELEASES_DIR="${REMOTE_APP_BASE}/releases"
 REMOTE_CURRENT_LINK="${REMOTE_APP_BASE}/current"
@@ -315,9 +315,9 @@ install_docker_compose() {
     return
   fi
   # Fallback to docker-compose binary
-  COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)"
-  sudo curl -L "$COMPOSE_URL" -o /usr/local/bin/docker-compose
-  sudo chmod +x /usr/local/bin/docker-compose
+  COMPOSE_URL="https://github.com/docker/compose/releases/download/v2.40.1/docker-compose-$(uname -s)-$(uname -m)"
+  sudo curl -L "$COMPOSE_URL" -o /usr/local/lib/docker/cli-plugins/docker-compose
+  sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
 }
 
 install_nginx() {
@@ -383,7 +383,7 @@ log "Remote environment prepared."
 
 
 # ------------------------------------------------------------
-# 6. Deploy the Dockerized Application (transfer files & run)
+# Task 6: Deploy the Dockerized Application (transfer files & run)
 # ------------------------------------------------------------
 # Create a remote release dir name
 RELEASE_NAME="${GIT_BRANCH//\//-}-${TIMESTAMP}"
@@ -424,7 +424,7 @@ elif ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -f '${REMOTE_CURRENT_LINK}/do
 fi
 
 # remote deployment script (build/run) - idempotent: docker-compose down/up or docker rm/run
-read -r -d '' REMOTE_DEPLOY_SCRIPT <<'REMOTE_DEPLOY_EOF' || true
+read -r -d '' REMOTE_DOCKER_SCRIPT <<'REMOTE_DOCKER_EOF' || true
 set -euo pipefail
 APP_DIR='__APP_DIR__'
 USE_COMPOSE='__USE_COMPOSE__'
@@ -434,6 +434,8 @@ log_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][DEPLOY] %s"
 err_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][DEPLOY][ERROR] %s" "$1" >&2; exit 3; }
 
 cd "$APP_DIR"
+pwd
+ls -la $APP_DIR
 
 if [[ "$USE_COMPOSE" == "true" ]]; then
   # bring down previous stack gracefully (idempotent)
@@ -461,24 +463,170 @@ else
   docker run -d --restart unless-stopped --name "$SERVICE_NAME" -p 127.0.0.1:${INTERNAL_PORT}:${INTERNAL_PORT} "$IMAGE_TAG"
 fi
 
-REMOTE_DEPLOY_EOF
+REMOTE_DOCKER_EOF
 
-REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__APP_DIR__/$REMOTE_CURRENT_LINK}"
-REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__USE_COMPOSE__/$DEPLOY_WITH_COMPOSE}"
-REMOTE_DEPLOY_SCRIPT="${REMOTE_DEPLOY_SCRIPT//__APP_INTERNAL_PORT__/$APP_INTERNAL_PORT}"
+REMOTE_DOCKER_SCRIPT="${REMOTE_DOCKER_SCRIPT//__APP_DIR__/$REMOTE_CURRENT_LINK}"
+REMOTE_DOCKER_SCRIPT="${REMOTE_DOCKER_SCRIPT//__USE_COMPOSE__/$DEPLOY_WITH_COMPOSE}"
+REMOTE_DOCKER_SCRIPT="${REMOTE_DOCKER_SCRIPT//__APP_INTERNAL_PORT__/$APP_INTERNAL_PORT}"
 
 log "Executing remote deployment script..."
-ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" 'bash -s' <<'EOF' 2>>"$LOGFILE"
-$(cat <<'INNER'
-__REMOTE_DEPLOY__
-INNER
-)
-EOF
 # replace placeholder in the heredoc with actual content in a safe way
 # But simpler: using direct heredoc above is messy; instead run with variable expansion:
-ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -s > /dev/null 2>>"$LOGFILE" <<EOF
-$REMOTE_DEPLOY_SCRIPT
+if [[ "$REMOTE_DOCKER_SCRIPT" == *"__APP_DIR__"* ]]; then
+    err "Placeholder substitution failed (found __APP_DIR__ still in script)"
+fi
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" 'bash -s' <<EOF 2>>"$LOGFILE"
+$REMOTE_DOCKER_SCRIPT
 EOF
 
 log "Remote containers started."
+
+# -----------------------------------------
+# Task 7: Configure Nginx as Reverse Proxy
+# -----------------------------------------
+log "Configuring Nginx reverse proxy on remote to forward port 80 -> container port ${APP_INTERNAL_PORT}"
+
+# Build nginx config (supports Debian/Ubuntu and RHEL by placing in appropriate directory)
+read -r -d '' NGINX_CONF_TEMPLATE <<'NGINX_CONF' || true
+server {
+    listen 80;
+    server_name _;
+    # Proxy to local app container
+    location / {
+        proxy_pass http://127.0.0.1:__APP_PORT__;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_connect_timeout 5;
+        proxy_read_timeout 60;
+    }
+
+    # SSL readiness placeholder:
+    # To enable SSL, install certbot and adjust below to listen 443 and provide ssl_certificate paths.
+    # Example (self-signed or certbot-managed) can be added here.
+}
+NGINX_CONF
+
+NGINX_CONF="${NGINX_CONF//__APP_PORT__/$APP_INTERNAL_PORT}"
+
+# Remote placement: prefer /etc/nginx/sites-available and sites-enabled (Debian), otherwise /etc/nginx/conf.d
+NGINX_REMOTE_PATH_DEBIAN="/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf"
+NGINX_REMOTE_ENABLED="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}.conf"
+NGINX_REMOTE_PATH_CONF_D="/etc/nginx/conf.d/${NGINX_SITE_NAME}.conf"
+
+# Create temp file locally then rsync to remote
+TMP_NGINX="/tmp/${NGINX_SITE_NAME}_${TIMESTAMP}.conf"
+printf "%s\n" "$NGINX_CONF" > "$TMP_NGINX"
+
+# Upload config to remote in the best location detected
+# Detect remote OS and write appropriate path
+REMOTE_NGINX_TARGET="$NGINX_REMOTE_PATH_CONF_D"  # default
+if ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -d /etc/nginx/sites-available ]" >/dev/null 2>&1; then
+  REMOTE_NGINX_TARGET="$NGINX_REMOTE_PATH_DEBIAN"
+fi
+
+rsync -e "ssh -i $SSH_OPTS" "$TMP_NGINX" "${SSH_USER}@${SSH_HOST}:/tmp/${NGINX_SITE_NAME}.conf" >>"$LOGFILE" 2>&1 || err "Failed to upload nginx config"
+
+# Move config into place and enable
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -se <<'REMOTE_NGINX' 2>>"$LOGFILE"
+set -euo pipefail
+TARGET="${1}"
+SITE_AVAILABLE="/etc/nginx/sites-available/__NGINX_SITE_NAME__"
+SITE_ENABLED="/etc/nginx/sites-enabled/__NGINX_SITE_NAME__"
+TMP="/tmp/__NGINX_SITE_NAME__.conf"
+if [ -d /etc/nginx/sites-available ]; then
+  sudo mv "$TMP" "$SITE_AVAILABLE"
+  sudo ln -sf "$SITE_AVAILABLE" "$SITE_ENABLED"
+  sudo chmod 644 "$SITE_AVAILABLE"
+else
+  sudo mv "$TMP" "$TARGET"
+  sudo chmod 644 "$TARGET"
+fi
+# Test nginx config
+if sudo nginx -t; then
+  sudo systemctl reload nginx || true
+else
+  echo "NGINX_TEST_FAILED" >&2
+  exit 5
+fi
+REMOTE_NGINX
+# pass TARGET
+# replace placeholders by shell parameter expansion
+# But we need to pass the correct args; simpler to inject proper values using env expansion:
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -se <<EOF 2>>"$LOGFILE"
+set -euo pipefail
+TARGET="${REMOTE_NGINX_TARGET}"
+SITE_AVAILABLE="/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf"
+SITE_ENABLED="/etc/nginx/sites-enabled/${NGINX_SITE_NAME}.conf"
+TMP="/tmp/${NGINX_SITE_NAME}.conf"
+if [ -d /etc/nginx/sites-available ]; then
+  sudo mv "\$TMP" "\$SITE_AVAILABLE"
+  sudo ln -sf "\$SITE_AVAILABLE" "\$SITE_ENABLED"
+  sudo chmod 644 "\$SITE_AVAILABLE"
+else
+  sudo mv "\$TMP" "\$TARGET"
+  sudo chmod 644 "\$TARGET"
+fi
+if sudo nginx -t; then
+  sudo systemctl reload nginx || true
+else
+  echo "NGINX_TEST_FAILED" >&2
+  exit 5
+fi
+EOF
+
+log "Nginx configured and reloaded."
+
+# ---------------------------
+# Task 8: Validate Deployment
+# ---------------------------
+log "Validating deployment: checking Docker service, container health, and nginx proxy..."
+
+# 8a. Docker service
+if ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "sudo systemctl is-active --quiet docker"; then
+  log "Docker service is active on remote."
+else
+  warn "Docker service not active; attempting to start..."
+  ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "sudo systemctl enable --now docker" || warn "Failed to start Docker"
+fi
+
+# 8b. Container health: prefer docker inspect health, else check that container exists and port is listening
+SSH_CHECK_HEALTH_COMMAND="
+set -euo pipefail
+cd '${REMOTE_CURRENT_LINK}'
+# try common names: docker-compose uses service names; try 'myapp' fallback
+CONTAINERS=\$(docker ps --format '{{.Names}}')
+# If health status exists, print it:
+for c in \$CONTAINERS; do
+  H=\$(docker inspect --format '{{json .State.Health}}' \"\$c\" 2>/dev/null || true)
+  if [[ -n \"\$H\" && \"\$H\" != \"null\" ]]; then
+    echo \"CONTAINER:\$c HEALTH:\$H\"
+  fi
+done
+# Check if any container maps to the internal port on 127.0.0.1
+ss -ltnp 2>/dev/null | grep -E \":${APP_INTERNAL_PORT} \" || true
+"
+log "Inspecting containers on remote..."
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "$SSH_CHECK_HEALTH_COMMAND" >>"$LOGFILE" 2>&1 || warn "Container health check command returned non-zero (non-fatal)"
+
+# 8c. Test endpoint via curl from remote (localhost) and from local machine
+log "Testing HTTP endpoint from remote (curl http://127.0.0.1:${APP_INTERNAL_PORT})..."
+REMOTE_CURL_TEST=$(ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "curl -I --max-time 5 http://127.0.0.1:${APP_INTERNAL_PORT} 2>/dev/null || true" || true)
+if [[ -n "$REMOTE_CURL_TEST" ]]; then
+  log "Remote localhost curl succeeded (headers):"
+  printf "%s\n" "$REMOTE_CURL_TEST" | sed -n '1,10p' | tee -a "$LOGFILE"
+else
+  warn "Remote curl to app internal port returned no response."
+fi
+
+log "Testing public HTTP via Nginx from local (curl -I --max-time 10 http://${SSH_HOST}/ )..."
+LOCAL_NGINX_TEST=$(curl -I --max-time 10 "http://${SSH_HOST}/" 2>/dev/null || true)
+if [[ -n "$LOCAL_NGINX_TEST" ]]; then
+  log "Public curl via nginx succeeded (headers):"
+  printf "%s\n" "$LOCAL_NGINX_TEST" | sed -n '1,10p' | tee -a "$LOGFILE"
+else
+  warn "Public curl to http://${SSH_HOST}/ failed or timed out. Check firewall, security groups, or nginx config."
+fi
+
 
