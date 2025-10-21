@@ -380,3 +380,40 @@ $REMOTE_SETUP_SCRIPT
 EOF
 
 log "Remote environment prepared."
+
+
+# ------------------------------------------------------------
+# 6. Deploy the Dockerized Application (transfer files & run)
+# ------------------------------------------------------------
+# Create a remote release dir name
+RELEASE_NAME="${GIT_BRANCH//\//-}-${TIMESTAMP}"
+REMOTE_RELEASE_DIR="${REMOTE_RELEASES_DIR}/${RELEASE_NAME}"
+
+log "Transferring project files to remote: ${SSH_USER}@${SSH_HOST}:${REMOTE_RELEASE_DIR}"
+# create remote release directory
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "mkdir -p '${REMOTE_RELEASE_DIR}' && chown -R ${SSH_USER}:${SSH_USER} '${REMOTE_RELEASE_DIR}'" || err "Failed to create remote release directory"
+
+# rsync to remote (will exclude .git and node_modules by RSYNC_OPTS)
+rsync -e "ssh -i $SSH_OPTS" $RSYNC_OPTS ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_RELEASE_DIR}/" >>"$LOGFILE" 2>&1 || err "rsync of project files failed"
+
+log "Files transferred. Setting proper permissions on remote release dir..."
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "chmod -R g+rX,o-rwx '${REMOTE_RELEASE_DIR}' || true" || warn "Failed to set remote permissions"
+
+# Link current -> new release atomically
+log "Updating current symlink to point to new release..."
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "ln -sfn '${REMOTE_RELEASE_DIR}' '${REMOTE_CURRENT_LINK}' && chown -h ${SSH_USER}:${SSH_USER} '${REMOTE_CURRENT_LINK}'" || warn "Failed to update current symlink"
+
+# Decide deployment method: docker-compose if file exists, else Dockerfile build + run
+REMOTE_COMPOSE_PATH="${REMOTE_CURRENT_LINK}/docker-compose.yml"
+REMOTE_DOCKERFILE_PATH="${REMOTE_CURRENT_LINK}/Dockerfile"
+DEPLOY_WITH_COMPOSE=false
+
+# Check remote files existence
+if ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -f '${REMOTE_COMPOSE_PATH}' ]" >/dev/null 2>&1; then
+  DEPLOY_WITH_COMPOSE=true
+  log "Detected docker-compose on remote deployment path."
+elif ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -f '${REMOTE_CURRENT_LINK}/docker-compose.yaml' ]" >/dev/null 2>&1; then
+  DEPLOY_WITH_COMPOSE=true
+  REMOTE_COMPOSE_PATH="${REMOTE_CURRENT_LINK}/docker-compose.yaml"
+fi
+
