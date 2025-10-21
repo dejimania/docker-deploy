@@ -159,3 +159,22 @@ log "  SSH target: ${SSH_USER}@${SSH_HOST}"
 log "  SSH key: ${SSH_KEY_PATH:-(ssh-agent/default)}"
 log "  App internal port: ${APP_INTERNAL_PORT}"
 log "  Local project dir: ${PROJECT_DIR_NAME:-(derived from repo)}"
+
+# Minimal validation
+if [[ -z "$GIT_REPO_URL" || -z "$GIT_PAT" || -z "$SSH_USER" || -z "$SSH_HOST" ]]; then
+  err "Missing required parameters. Exiting."
+fi
+
+# If SSH key path specified, ensure file exists and add to ssh-agent for this script
+if [[ -n "${SSH_KEY_PATH:-}" ]]; then
+  if [[ ! -f "$SSH_KEY_PATH" ]]; then
+    err "SSH key file not found at $SSH_KEY_PATH"
+  fi
+  log "Using SSH key: $SSH_KEY_PATH"
+  # ensure ssh-agent running, try to add key (silently)
+  eval "$(ssh-agent -s)" >/dev/null 2>&1 || true
+  ssh-add -l >/dev/null 2>&1 || true
+  ssh-add "$SSH_KEY_PATH" >/dev/null 2>&1 || warn "Unable to add SSH key to ssh-agent; ensure agent is running"
+fi
+
+
