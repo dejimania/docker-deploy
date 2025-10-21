@@ -394,7 +394,13 @@ log "Transferring project files to remote: ${SSH_USER}@${SSH_HOST}:${REMOTE_RELE
 ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "mkdir -p '${REMOTE_RELEASE_DIR}' && chown -R ${SSH_USER}:${SSH_USER} '${REMOTE_RELEASE_DIR}'" || err "Failed to create remote release directory"
 
 # rsync to remote (will exclude .git and node_modules by RSYNC_OPTS)
-rsync -e "ssh -i $SSH_OPTS" $RSYNC_OPTS ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_RELEASE_DIR}/" >>"$LOGFILE" 2>&1 || err "rsync of project files failed"
+#rsync -e "ssh -i $SSH_OPTS" $RSYNC_OPTS ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_RELEASE_DIR}/" >>"$LOGFILE" 2>&1 || err "rsync of project files failed"
+# Run rsync with better quoting and capture error
+if ! rsync -avz --delete --exclude=.git -e "ssh -i '$SSH_KEY_PATH' $SSH_OPTS" ./ "${SSH_USER}@${SSH_HOST}:${REMOTE_RELEASE_DIR}/" >>"$LOGFILE" 2>&1; then
+    warn "rsync failed. Dumping last 20 log lines for inspection:"
+    tail -n 20 "$LOGFILE"
+    error "rsync of project files failed (check SSH key, remote permissions, or rsync availability)"
+fi
 
 log "Files transferred. Setting proper permissions on remote release dir..."
 ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "chmod -R g+rX,o-rwx '${REMOTE_RELEASE_DIR}' || true" || warn "Failed to set remote permissions"
