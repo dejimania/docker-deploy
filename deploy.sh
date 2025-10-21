@@ -252,3 +252,131 @@ else
   err "SSH connectivity test failed. Ensure user/key/host are correct and accessible."
 fi
 
+# ---------------------------------------------------------
+# Install Helper Function(will be executed on remote host)
+# ---------------------------------------------------------
+read -r -d '' REMOTE_SETUP_SCRIPT <<'REMOTE_EOF' || true
+set -euo pipefail
+# This script runs on the remote server (as the SSH user) and will:
+# - create app directories
+# - install Docker, docker-compose, and nginx (if missing)
+# - add user to docker group (if sudo available)
+# - enable and start services
+APP_BASE_DIR='__REMOTE_APP_BASE__'
+RELEASES_DIR='__REMOTE_RELEASES_DIR__'
+CURRENT_LINK='__REMOTE_CURRENT_LINK__'
+SSH_USER='__SSH_USER__'
+
+log_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][INFO] %s" "$1"; }
+err_remote(){ printf '%s\n' "$(date +'%Y-%m-%dT%H:%M:%S%z') [REMOTE][ERROR] %s" "$1" >&2; exit 2; }
+
+# Create directories
+if sudo mkdir -p "$RELEASES_DIR" >/dev/null 2>&1; then
+  sudo chown -R "$SSH_USER":"$SSH_USER" "$APP_BASE_DIR" || true
+  log_remote "Created and set ownership for $APP_BASE_DIR"
+else
+  err_remote "Failed to create $APP_BASE_DIR"
+fi
+
+# Detect distro
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  DISTRO="$ID"
+  DISTRO_LIKE="${ID_LIKE:-}"
+else
+  DISTRO=""
+fi
+log_remote "Detected distro: $DISTRO $DISTRO_LIKE"
+
+install_package_debian() {
+  sudo apt-get update -y
+  sudo apt-get install -y apt-transport-https ca-certificates curl gnupg lsb-release software-properties-common
+}
+
+install_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    log_remote "Docker already installed: $(docker --version || true)"
+    return
+  fi
+  log_remote "Installing Docker using get.docker.com script (remote)..."
+  curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+  sudo sh /tmp/get-docker.sh
+  rm -f /tmp/get-docker.sh
+}
+
+install_docker_compose() {
+  if command -v docker-compose >/dev/null 2>&1; then
+    log_remote "docker-compose already present: $(docker-compose --version || true)"
+    return
+  fi
+  # Try to install docker-compose plugin first (docker compose)
+  if docker --help | grep -q 'compose'; then
+    log_remote "Docker Compose plugin is available via docker compose"
+    return
+  fi
+  # Fallback to docker-compose binary
+  COMPOSE_URL="https://github.com/docker/compose/releases/latest/download/docker-compose-$(uname -s)-$(uname -m)"
+  sudo curl -L "$COMPOSE_URL" -o /usr/local/bin/docker-compose
+  sudo chmod +x /usr/local/bin/docker-compose
+}
+
+install_nginx() {
+  if command -v nginx >/dev/null 2>&1; then
+    log_remote "nginx already installed: $(nginx -v 2>&1 || true)"
+    return
+  fi
+  log_remote "Installing nginx..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update -y
+    sudo apt-get install -y nginx
+  elif command -v yum >/dev/null 2>&1; then
+    sudo yum install -y epel-release
+    sudo yum install -y nginx
+  else
+    err_remote "No supported package manager found for nginx install"
+  fi
+  sudo systemctl enable --now nginx || true
+}
+
+# run installs (best-effort, idempotent)
+if command -v apt-get >/dev/null 2>&1; then
+  install_package_debian
+fi
+install_docker
+install_docker_compose
+install_nginx
+
+# Add SSH user to docker group if sudo available
+if id -nG "$SSH_USER" | grep -qw docker; then
+  log_remote "User $SSH_USER already in docker group"
+else
+  sudo usermod -aG docker "$SSH_USER" || log_remote "usermod may have failed (non-critical); ensure $SSH_USER has docker access"
+  log_remote "Added $SSH_USER to docker group (you may need to re-login for group to apply)"
+fi
+
+# Ensure services enabled
+sudo systemctl enable --now docker || true
+if command -v nginx >/dev/null 2>&1; then
+  sudo systemctl enable --now nginx || true
+fi
+
+# Print versions
+docker --version || true
+docker-compose --version || true
+nginx -v 2>/dev/null || true
+
+REMOTE_EOF
+
+# Replace placeholders with real values (careful with quoting)
+REMOTE_SETUP_SCRIPT="${REMOTE_SETUP_SCRIPT//__REMOTE_APP_BASE__/$REMOTE_APP_BASE}"
+REMOTE_SETUP_SCRIPT="${REMOTE_SETUP_SCRIPT//__REMOTE_RELEASES_DIR__/$REMOTE_RELEASES_DIR}"
+REMOTE_SETUP_SCRIPT="${REMOTE_SETUP_SCRIPT//__REMOTE_CURRENT_LINK__/$REMOTE_CURRENT_LINK}"
+REMOTE_SETUP_SCRIPT="${REMOTE_SETUP_SCRIPT//__SSH_USER__/$SSH_USER}"
+
+log "Executing remote setup script to prepare environment (install Docker, docker-compose, nginx where needed)..."
+# Use ssh and pipe script in to avoid storing it on disk
+ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" 'bash -s' <<EOF 2>>"$LOGFILE"
+$REMOTE_SETUP_SCRIPT
+EOF
+
+log "Remote environment prepared."
