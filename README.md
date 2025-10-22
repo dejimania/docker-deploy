@@ -41,12 +41,23 @@ It also handles environment preparation, Nginx reverse proxy configuration, and 
    ```bash
    git clone <this-repo-url>
    cd <repo-directory>
+
+2. **Make the script executable:**
+   ```bash
    chmod +x deploy.sh
+   ```
 
-2. **Run the deployment script**
-./deploy.sh
+3. **Run the deployment:**
+   ```bash
+   ./deploy.sh
+   ```
 
-3. **Provide required inputs interactively**:
+4. **Monitor logs:**
+   ```bash
+   tail -f deploy.log
+   ```
+
+5. **Provide required inputs interactively**:
 - **Git Repository URL**
 - **Personal Access Token (PAT)**
 - **Branch name (defaults to main)**
@@ -55,12 +66,48 @@ It also handles environment preparation, Nginx reverse proxy configuration, and 
 - **SSH key path (e.g., ~/.ssh/id_rsa)**
 - **Application internal port (e.g., 3000)**
 
-4. **The script will**:
-- **Validate inputs**
-- **Clone or pull your repository**
-- **SSH into your remote server**
-- **Install and configure Docker, Docker Compose, and Nginx**
-- **Transfer project files**
-- **Build and run your Docker containers**
-- **Configure Nginx to reverse-proxy http://<server-ip> → 127.0.0.1:<container-port>**
-- **Validate that the app and Nginx are running correctly**
+
+---
+
+## 🔄 What the Script Does
+
+| Step | Task | Description |
+|------|------|-------------|
+| 1 | Validate environment | Checks required tools and variables |
+| 2 | Prepare remote host | Installs Docker & Nginx if not found |
+| 3 | Sync project files | Uses rsync to copy source code to remote |
+| 4 | Build & Run Docker container | Builds image and launches container |
+| 5 | Configure Nginx | Creates and installs reverse proxy config |
+| 6 | Verify | Tests Nginx configuration and restarts service |
+
+---
+
+---
+
+## 🧩 Troubleshooting
+
+| Issue | Possible Cause | Fix |
+|-------|----------------|-----|
+| `rsync of project files failed` | Missing SSH key or incorrect path | Verify `$SSH_KEY_PATH` and permissions |
+| `REMOTE_NGINX_TARGET: unbound variable` | Variable not set before use | Ensure initialization before SSH commands |
+| `Remote nginx config/reload failed` | Nginx config test failed | Run `sudo nginx -t` on remote to debug |
+
+---
+
+
+---
+
+## 🧾 License
+
+GPL License © 2025
+
+You are free to use, modify, and distribute this script with attribution.
+
+---
+
+## 💬 Author
+
+**Kamil Balogun**  
+DevOps / Cloud Engineer  
+📧 kamilbalogun@hotmail.com  
+🐙 GitHub: [dejimania](https://github.com/dejimania)
