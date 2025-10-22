@@ -487,7 +487,7 @@ log "Remote containers started."
 log "Configuring Nginx reverse proxy on remote to forward port 80 -> container port ${APP_INTERNAL_PORT}"
 
 # Build nginx config (supports Debian/Ubuntu and RHEL by placing in appropriate directory)
-read -r -d '' NGINX_CONF_TEMPLATE <<'NGINX_CONF' || true
+read -r -d '' NGINX_CONF_TEMPLATE <<'NGINX_CONF_EOF' || true
 server {
     listen 80;
     server_name _;
@@ -506,9 +506,9 @@ server {
     # To enable SSL, install certbot and adjust below to listen 443 and provide ssl_certificate paths.
     # Example (self-signed or certbot-managed) can be added here.
 }
-NGINX_CONF
+NGINX_CONF_EOF
 
-NGINX_CONF="${NGINX_CONF//__APP_PORT__/$APP_INTERNAL_PORT}"
+NGINX_CONF_TEMPLATE="${NGINX_CONF_TEMPLATE//__APP_PORT__/$APP_INTERNAL_PORT}"
 
 # Remote placement: prefer /etc/nginx/sites-available and sites-enabled (Debian), otherwise /etc/nginx/conf.d
 NGINX_REMOTE_PATH_DEBIAN="/etc/nginx/sites-available/${NGINX_SITE_NAME}.conf"
@@ -517,7 +517,7 @@ NGINX_REMOTE_PATH_CONF_D="/etc/nginx/conf.d/${NGINX_SITE_NAME}.conf"
 
 # Create temp file locally then rsync to remote
 TMP_NGINX="/tmp/${NGINX_SITE_NAME}_${TIMESTAMP}.conf"
-printf "%s\n" "$NGINX_CONF" > "$TMP_NGINX"
+printf "%s\n" "$NGINX_CONF_TEMPLATE" > "$TMP_NGINX"
 
 # Upload config to remote in the best location detected
 # Detect remote OS and write appropriate path
@@ -526,7 +526,7 @@ if ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" "[ -d /etc/nginx/sites-available ]
   REMOTE_NGINX_TARGET="$NGINX_REMOTE_PATH_DEBIAN"
 fi
 
-rsync -e "ssh -i $SSH_OPTS" "$TMP_NGINX" "${SSH_USER}@${SSH_HOST}:/tmp/${NGINX_SITE_NAME}.conf" >>"$LOGFILE" 2>&1 || err "Failed to upload nginx config"
+rsync -avz -e "ssh -i '$SSH_KEY_PATH' $SSH_OPTS" "$TMP_NGINX" "${SSH_USER}@${SSH_HOST}:/tmp/${NGINX_SITE_NAME}.conf" >>"$LOGFILE" 2>&1 || err "Failed to upload nginx config"
 
 # Move config into place and enable
 ssh -i $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -se <<'REMOTE_NGINX' 2>>"$LOGFILE"
@@ -629,4 +629,40 @@ else
   warn "Public curl to http://${SSH_HOST}/ failed or timed out. Check firewall, security groups, or nginx config."
 fi
 
+# -----------------------------------------------
+# 9. Logging & error handling (already included)
+# -----------------------------------------------
+log "Deployment finished at $(date +'%Y-%m-%dT%H:%M:%S%z'). Log: $LOGFILE"
 
+# ------------------------------------
+# 10. Idempotency and cleanup support
+# ------------------------------------
+if $CLEANUP_MODE; then
+  log "Cleanup mode requested. Proceeding to remove deployed resources on remote."
+  ssh $SSH_OPTS "${SSH_USER}@${SSH_HOST}" bash -se <<'REMOTE_CLEANUP' 2>>"$LOGFILE"
+set -euo pipefail
+APP_BASE='__REMOTE_APP_BASE__'
+CURRENT='__REMOTE_CURRENT_LINK__'
+NGINX_SITE='__NGINX_SITE__'
+# stop and remove containers
+docker-compose -f "\${CURRENT}/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+# remove containers named 'myapp'
+docker rm -f myapp 2>/dev/null || true
+# remove nginx configs
+if [ -f /etc/nginx/sites-available/${NGINX_SITE}.conf ]; then
+  sudo rm -f /etc/nginx/sites-available/${NGINX_SITE}.conf
+  sudo rm -f /etc/nginx/sites-enabled/${NGINX_SITE}.conf || true
+fi
+sudo rm -f /etc/nginx/conf.d/${NGINX_SITE}.conf || true
+sudo systemctl reload nginx || true
+# remove release dirs (careful)
+sudo rm -rf "${APP_BASE}"
+REMOTE_CLEANUP
+  log "Cleanup completed on remote."
+fi
+
+# ---------------------------
+# End of script
+# ---------------------------
+log "Script completed successfully."
+exit 0
